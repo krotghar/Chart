@@ -1,6 +1,5 @@
 package com.example.chart.ui
 
-import android.annotation.SuppressLint
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.calculateZoom
@@ -10,7 +9,6 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -18,13 +16,16 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -37,6 +38,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
@@ -49,12 +52,14 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.times
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.toImmutableList
-import kotlin.math.abs
-import kotlin.math.sign
+
+private val DefaultChartHeight = 300.dp
+private val ChartStartOffset = 20.dp
+private val XLabelTopOffset = 20.dp
 
 @Preview(showBackground = true, heightDp = 400)
 @Composable
-fun ChartPreview() {
+private fun ChartPreview() {
     val samplePoints = listOf(
         ChartPointUiModel(2013, 115),
         ChartPointUiModel(2014, 106),
@@ -115,7 +120,7 @@ data class ChartStyle(
     val chartPaddingTop: Dp = 40.dp,
     val tooltipColor: Color = Color(0xFFE3F2FD),
     val tooltipTextColor: Color = Color(0xFF1976D2),
-    val backGroundColor: Color = Color.White,
+    val backgroundColor: Color = Color.White,
     val isZoomEnabled: Boolean = false
 ) {
     companion object {
@@ -123,44 +128,69 @@ data class ChartStyle(
     }
 }
 
-@SuppressLint("UnusedBoxWithConstraintsScope")
 @Composable
 fun Chart(
     points: ImmutableList<ChartPointUiModel>,
     modifier: Modifier = Modifier,
     style: ChartStyle = ChartStyle.Default,
+    contentDescription: String? = null,
     onPointSelected: (ChartPointUiModel?) -> Unit = {}
 ) {
-    if (points.isEmpty()) return
+    if (points.isEmpty()) {
+        BoxWithConstraints(
+            modifier = modifier
+                .fillMaxWidth()
+                .background(style.backgroundColor)
+                .semantics { contentDescription?.let { this.contentDescription = it } }
+        ) {
+            val totalHeight = if (constraints.hasBoundedHeight) maxHeight else DefaultChartHeight
+            Box(modifier = Modifier.fillMaxWidth().height(totalHeight))
+        }
+        return
+    }
 
     val scrollState = rememberScrollState()
     var selectedIndex by remember { mutableStateOf<Int?>(null) }
     var zoomScale by remember { mutableFloatStateOf(1f) }
     val textMeasurer = rememberTextMeasurer()
+    val currentOnPointSelected by rememberUpdatedState(onPointSelected)
 
-    val minY = points.minOf { it.y }
-    val maxY = points.maxOf { it.y }
-
-    val yRange = (maxY - minY).coerceAtLeast(1)
-    val yStep = (yRange / 5).coerceAtLeast(1)
-    val yLabels = (minY..maxY step yStep).toList().let {
-        if (it.last() < maxY) it + (it.last() + yStep) else it
+    LaunchedEffect(points) {
+        if (selectedIndex != null) {
+            selectedIndex = null
+            currentOnPointSelected(null)
+        }
     }
 
+    LaunchedEffect(style.isZoomEnabled) {
+        if (!style.isZoomEnabled) zoomScale = 1f
+    }
+
+    val yLabels = remember(points) { yAxisLabels(points.minOf { it.y }, points.maxOf { it.y }) }
     val actualMinY = yLabels.first()
-    val actualMaxY = yLabels.last()
-    val actualYRange = (actualMaxY - actualMinY).toFloat().coerceAtLeast(1f)
+    val actualYRange = (yLabels.last() - actualMinY).toFloat().coerceAtLeast(1f)
+
+    val yLabelLayouts = remember(yLabels, style.labelTextStyle, textMeasurer) {
+        yLabels.map { textMeasurer.measure(text = AnnotatedString(it.toString()), style = style.labelTextStyle) }
+    }
+    val xLabelLayouts = remember(points, style.labelTextStyle, textMeasurer) {
+        points.map { textMeasurer.measure(text = AnnotatedString(it.x.toString()), style = style.labelTextStyle) }
+    }
 
     BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
-            .background(Color.White)
+            .background(style.backgroundColor)
+            .semantics {
+                this.contentDescription = contentDescription
+                    ?: points.joinToString(separator = ", ") { "${it.x}: ${it.y}" }
+            }
     ) {
-        val totalHeight = maxHeight
-        val chartHeight = totalHeight - style.xAxisHeight - style.chartPaddingTop
+        val totalHeight = if (constraints.hasBoundedHeight) maxHeight else DefaultChartHeight
+        val chartHeight = (totalHeight - style.xAxisHeight - style.chartPaddingTop).coerceAtLeast(0.dp)
         val viewportWidth = maxWidth - style.yAxisWidth
 
-        Row(modifier = Modifier.fillMaxSize()) {
+        Row(modifier = Modifier.fillMaxWidth().height(totalHeight)) {
             // Y-Axis Labels
             Canvas(
                 modifier = Modifier
@@ -170,13 +200,9 @@ fun Chart(
                 val heightPx = chartHeight.toPx()
                 val paddingTopPx = style.chartPaddingTop.toPx()
 
-                yLabels.forEach { rank ->
+                yLabels.forEachIndexed { index, rank ->
                     val y = paddingTopPx + ((rank - actualMinY) / actualYRange) * heightPx
-                    val text = rank.toString()
-                    val textResult = textMeasurer.measure(
-                        text = AnnotatedString(text),
-                        style = style.labelTextStyle
-                    )
+                    val textResult = yLabelLayouts[index]
 
                     drawText(
                         textLayoutResult = textResult,
@@ -209,7 +235,7 @@ fun Chart(
                         }
                     }
                     .horizontalScroll(scrollState)
-                    .pointerInput(points, zoomScale) {
+                    .pointerInput(points, style.pointSpacing) {
                         awaitPointerEventScope {
                             while (true) {
                                 val event = awaitPointerEvent(PointerEventPass.Initial)
@@ -217,30 +243,32 @@ fun Chart(
 
                                 if (pressedChanges.size == 1) {
                                     val change = pressedChanges[0]
-                                    val spacingPx = scaledSpacing.toPx()
-                                    val startOffsetPx = 20.dp.toPx()
+                                    val spacingPx = (style.pointSpacing * zoomScale).toPx().coerceAtLeast(1f)
 
                                     // Touch position is already relative to the scrolled content
-                                    val touchX = change.position.x
-                                    val index = ((touchX - startOffsetPx) / spacingPx + 0.5f).toInt()
-                                        .coerceIn(points.indices)
+                                    val index = nearestPointIndex(
+                                        touchX = change.position.x,
+                                        startOffsetPx = ChartStartOffset.toPx(),
+                                        spacingPx = spacingPx,
+                                        pointCount = points.size
+                                    )
 
                                     if (selectedIndex != index) {
                                         selectedIndex = index
-                                        onPointSelected(points[index])
+                                        currentOnPointSelected(points[index])
                                     }
                                 } else {
                                     // No fingers or multiple fingers (zoom)
                                     if (selectedIndex != null) {
                                         selectedIndex = null
-                                        onPointSelected(null)
+                                        currentOnPointSelected(null)
                                     }
                                 }
                             }
                         }
                     }
             ) {
-                val chartWidth = points.size * scaledSpacing + 60.dp // ensure space for trailing tick and centered labels
+                val chartWidth = points.size * scaledSpacing + 60.dp // start offset plus room for the last rotated label
 
                 Canvas(
                     modifier = Modifier
@@ -249,8 +277,9 @@ fun Chart(
                 ) {
                     val widthPx = chartWidth.toPx()
                     val heightPx = chartHeight.toPx()
-                    val spacingPx = scaledSpacing.toPx()
+                    val spacingPx = scaledSpacing.toPx().coerceAtLeast(1f)
                     val paddingTopPx = style.chartPaddingTop.toPx()
+                    val startOffsetPx = ChartStartOffset.toPx()
 
                     // Draw Grid Lines
                     yLabels.forEach { rank ->
@@ -265,7 +294,7 @@ fun Chart(
 
                     // Prepare Points
                     val canvasPoints = points.mapIndexed { index, model ->
-                        val x = index * spacingPx + 20.dp.toPx() // start offset
+                        val x = index * spacingPx + startOffsetPx
                         // Inverted Y-Axis: min rank at top (0% of height), max rank at bottom (100% of height)
                         val y = paddingTopPx + ((model.y - actualMinY) / actualYRange) * heightPx
                         Offset(x, y)
@@ -296,9 +325,9 @@ fun Chart(
                         )
                     }
 
-                    // Draw X-Axis Ticks (including trailing tick)
-                    for (i in 0..points.size) {
-                        val x = i * spacingPx + 20.dp.toPx()
+                    // Draw X-Axis Ticks (one per point)
+                    for (i in points.indices) {
+                        val x = i * spacingPx + startOffsetPx
                         val tickHeight = 6.dp.toPx()
                         drawLine(
                             color = style.gridColor,
@@ -308,22 +337,17 @@ fun Chart(
                         )
                     }
 
-                    // Draw X-Axis Labels (centered between ticks)
-                    points.forEachIndexed { index, model ->
-                        val x = index * spacingPx + 20.dp.toPx()
-                        val centerX = x + spacingPx / 2f
-                        val text = model.x.toString()
-                        val textResult = textMeasurer.measure(
-                            text = AnnotatedString(text),
-                            style = style.labelTextStyle
-                        )
+                    // Draw X-Axis Labels (centered under points)
+                    val xLabelTop = paddingTopPx + heightPx + XLabelTopOffset.toPx()
+                    xLabelLayouts.forEachIndexed { index, textResult ->
+                        val centerX = index * spacingPx + startOffsetPx
 
-                        rotate(degrees = 45f, pivot = Offset(centerX, paddingTopPx + heightPx + 20.dp.toPx())) {
+                        rotate(degrees = 45f, pivot = Offset(centerX, xLabelTop)) {
                             drawText(
                                 textLayoutResult = textResult,
                                 topLeft = Offset(
                                     centerX - textResult.size.width / 2f,
-                                    paddingTopPx + heightPx + 20.dp.toPx()
+                                    xLabelTop
                                 )
                             )
                         }
@@ -364,7 +388,7 @@ fun Chart(
                     }
 
                     // Draw Guideline and Tooltip if selected
-                    selectedIndex?.let { index ->
+                    selectedIndex?.takeIf { it in canvasPoints.indices }?.let { index ->
                         val cp = canvasPoints[index]
                         val model = points[index]
 
@@ -397,16 +421,15 @@ fun Chart(
                         val scrollOffsetPx = scrollState.value.toFloat()
 
                         // Constrain tooltip X to be within the visible viewport
-                        val tooltipLeft = (cp.x - tooltipWidth / 2f).coerceIn(
-                            scrollOffsetPx + 4.dp.toPx(),
-                            scrollOffsetPx + viewportWidthPx - tooltipWidth - 4.dp.toPx()
-                        )
+                        val minLeft = scrollOffsetPx + 4.dp.toPx()
+                        val maxLeft = maxOf(minLeft, scrollOffsetPx + viewportWidthPx - tooltipWidth - 4.dp.toPx())
+                        val tooltipLeft = (cp.x - tooltipWidth / 2f).coerceIn(minLeft, maxLeft)
 
                         drawRoundRect(
                             color = style.tooltipColor,
                             topLeft = Offset(tooltipLeft, tooltipTop),
                             size = Size(tooltipWidth, tooltipHeight),
-                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(4.dp.toPx())
+                            cornerRadius = CornerRadius(4.dp.toPx())
                         )
 
                         drawText(
@@ -433,41 +456,14 @@ private fun createMonotoneCubicPath(canvasPoints: List<Offset>): Path {
     val n = canvasPoints.size
     if (n < 2) return Path()
 
-    val m = FloatArray(n - 1)
-    val h = FloatArray(n - 1)
-    for (i in 0 until n - 1) {
-        h[i] = canvasPoints[i + 1].x - canvasPoints[i].x
-        m[i] = (canvasPoints[i + 1].y - canvasPoints[i].y) / h[i]
-    }
-
-    val d = FloatArray(n)
-    for (i in 1 until n - 1) {
-        if (m[i - 1] * m[i] <= 0f) {
-            d[i] = 0f
-        } else {
-            // Weighted average for tangents
-            val p = (m[i - 1] * h[i] + m[i] * h[i - 1]) / (h[i - 1] + h[i])
-            d[i] = sign(m[i]) * minOf(2 * abs(m[i - 1]), 2 * abs(m[i]), abs(p))
-        }
-    }
-
-    // Boundary conditions (Steffen's)
-    if (n > 2) {
-        // First point
-        val p0 = m[0] * (1f + h[0] / (h[0] + h[1])) - m[1] * h[0] / (h[0] + h[1])
-        d[0] = if (p0 * m[0] <= 0f) 0f else sign(m[0]) * minOf(abs(p0), 2 * abs(m[0]))
-        // Last point
-        val pn = m[n - 2] * (1f + h[n - 2] / (h[n - 2] + h[n - 3])) - m[n - 3] * h[n - 2] / (h[n - 2] + h[n - 3])
-        d[n - 1] = if (pn * m[n - 2] <= 0f) 0f else sign(m[n - 2]) * minOf(abs(pn), 2 * abs(m[n - 2]))
-    } else {
-        d[0] = m[0]
-        d[1] = m[0]
-    }
+    val xs = FloatArray(n) { canvasPoints[it].x }
+    val ys = FloatArray(n) { canvasPoints[it].y }
+    val d = monotoneCubicTangents(xs, ys)
 
     return Path().apply {
         moveTo(canvasPoints[0].x, canvasPoints[0].y)
         for (i in 0 until n - 1) {
-            val dx = h[i]
+            val dx = xs[i + 1] - xs[i]
             // Cubic Bézier control points derived from tangents
             val cp1x = canvasPoints[i].x + dx / 3f
             val cp1y = canvasPoints[i].y + (dx * d[i]) / 3f
